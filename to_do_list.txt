@@ -1,0 +1,7 @@
+- La misura ha un ritardo di massimo 2 secondi. Quindi, aspettandone 6 si è sicuri che il buffer
+ di mediana abbiamo preso almeno 5 misure buone, che hanno quinid riempito il filtro a media mobile.
+
+ 1. Confermare protocollo Daisy-PLC;    OK (problematiche Daisy)
+ 2. Modificare DB ICON e riportare Baia e Silo; OK
+ 3. Allineamento a sinistra input frame DB; OK
+ 3. Mail a ICAM per tempistiche di ritardo.

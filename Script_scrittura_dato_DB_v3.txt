@@ -1,0 +1,33 @@
+La tabella di riferimento è la seguente:
+
+[gs_wp_groupsdt_state]
+STORE_ID
+WORKPLACE_ID
+WEIGHT
+LEFT
+RIGHT
+
+CREATE TABLE [dbo].[gs_wp_groupsdt_state](
+    [store_id] [varchar](30) NOT NULL,
+    [workplace_id] [varchar](30) NOT NULL,
+    [weight] [numeric](15, 5) NOT NULL,
+    [left] [numeric](15,5) NOT NULL,
+    [right] [numeric](15,5) NOT NULL,
+    [status] [bit] NOT NULL,
+CONSTRAINT [PK_gs_wp_groupsdt_state] PRIMARY KEY NONCLUSTERED 
+(
+    [store_id] ASC,
+    [workplace_id] ASC
+)WITH (PAD_INDEX = OFF, STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON, OPTIMIZE_FOR_SEQUENTIAL_KEY = OFF) ON [PRIMARY]
+) ON [PRIMARY]
+GO
+
+ALTER TABLE [dbo].[gs_wp_groupsdt_state] ADD  DEFAULT ((0)) FOR [weight]
+ALTER TABLE [dbo].[gs_wp_groupsdt_state] ADD  DEFAULT ((0)) FOR [left]
+ALTER TABLE [dbo].[gs_wp_groupsdt_state] ADD  DEFAULT ((0)) FOR [right]
+ALTER TABLE [dbo].[gs_wp_groupsdt_state] ADD  DEFAULT ((0)) FOR [status]
+
+*il servizio dovrà scrivere nel campo weight relativo alla singola baia, il valore del peso registrato
+	esempio:
+
+	SILO1 - BAIA1 - 247
