@@ -11,7 +11,11 @@
 
 static const char *TAG = "Main";
 
+
+
 extern "C" void app_main(void) {
+    esp_log_level_set("*", ESP_LOG_VERBOSE);
+
     // Inizializza NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -81,19 +85,10 @@ extern "C" void app_main(void) {
         // Avvia il task HTTP Client
         xTaskCreate(&http_client_task, "http_client_task", 8192, NULL, 5, NULL);
 
-         // Esempio di loop per leggere gli input ADC
-        while (1) {
-            int adc_value0 = gpio_handler_read_adc_channel0();
-            int adc_value3 = gpio_handler_read_adc_channel3();
-            ESP_LOGI(TAG, "ADC Channel 0: %d, ADC Channel 3: %d", adc_value0, adc_value3);
-
-            // Esegui altre operazioni...
-            
-            vTaskDelay(pdMS_TO_TICKS(1000)); // Attendi 1 secondo
-        }
+        // Il loop per la lettura degli ADC è stato rimosso da qui
 
         // Deinizializza ADC quando non più necessario
-        gpio_handler_deinit();
+        // gpio_handler_deinit(); // Questo sarà gestito all'interno del task se necessario
 
     } else {
         // Avvia Wi-Fi AP e Web Server per la configurazione

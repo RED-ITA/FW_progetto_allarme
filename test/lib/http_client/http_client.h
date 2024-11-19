@@ -5,7 +5,7 @@
 extern "C" {
 #endif
 
-void http_client_init(void);
+void http_client_init(void *param);
 void http_client_task(void *param);
 
 #ifdef __cplusplus
