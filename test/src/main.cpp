@@ -80,7 +80,7 @@ extern "C" void app_main(void) {
         wifi_manager_wait_for_connection();
 
         // Inizializza GPIO
-        gpio_handler_init();
+        // gpio_handler_init();
 
         // Avvia il task HTTP Client
         xTaskCreate(&http_client_task, "http_client_task", 8192, NULL, 5, NULL);
