@@ -1,0 +1,1 @@
+C:\Users\psalv\.platformio\penv\Scripts\python.exe C:\Users\psalv\.platformio\packages\framework-espidf@3.40402.0\tools\idf.py add-dependency "espressif/esp_websocket_client^1.3.0"

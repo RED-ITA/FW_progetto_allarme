@@ -1,13 +1,7 @@
 Ciao sto sviluppando un programma per esp32 basasto sul esp-idf sviluppato con platformio sulla bord denky32, che mi permette di creare un sensore smart per la casa.
 
-il mio sensore deve avviarsi in modalità AP in caso non sia configurata la rete e aspettare che arrivi la configurazione, successivamente quando arriva deve salvarla e passare alla modaltà standard, dove
-deve prima collegarsi ala wifi puoi eseguire determiante funzioni con il webserver che si trova su di un indirzzo che ancora non definito ma la porta è la 5001. Una volta eseguite queste determinate operaizoni deve passare ad un stato di loop 
-in cui legge gli input su due pin specifici convertendoli dall'ADC e poi passa aggioran il server con altre funzioni sempre in loop, ma questo lo sviluppo più avanti però vorrei una base di programma che faccia tutte queste cose da dover solo sisteamre poi
-
-
-Attualemtne non funzione nulla però ti descrivo quello che ho scritto 
-
-le cartelle sono così composte e il compliatore da successo: 
+il programma dovrebbe funzoinare ma non riesco a coampilare perchè mi da errore con lal librerira del websocket perchè nella versione esp-idf non c'è se metto la versione mi dice che la mia scheda non sopporta la nulla
+nuova versione e di conseguenza non compila. per evitare problemi mi modifichi tutto il mio codice per fare la stessa cosa ma su freamwork arduino??
 
 your_project/
 ├── include/  // You can omit this if not needed
@@ -29,7 +23,9 @@ your_project/
 └── platformio.ini
 
 questi sono i miei programmi: 
-mian.cpp
+main.cpp:
+
+
 #include "wifi_manager.h"
 #include "web_server.h"
 #include "http_client.h"
@@ -42,7 +38,12 @@ mian.cpp
 #include "nvs.h"
 
 static const char *TAG = "Main";
+
+
+
 extern "C" void app_main(void) {
+    esp_log_level_set("*", ESP_LOG_VERBOSE);
+
     // Inizializza NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -55,13 +56,14 @@ extern "C" void app_main(void) {
     wifi_manager_init();
 
     if (wifi_manager_credentials_exist()) {
+        // Leggi le credenziali da NVS
         nvs_handle_t nvs_handle;
         char ssid[32];
         char password[64];
         size_t ssid_len = sizeof(ssid);
         size_t password_len = sizeof(password);
 
-        esp_err_t err = nvs_open("wifi_credentials", NVS_READONLY, &nvs_handle);
+        esp_err_t err = nvs_open("wifi_cred", NVS_READONLY, &nvs_handle);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Errore nell'apertura dell'NVS: %s", esp_err_to_name(err));
             // Gestisci l'errore
@@ -103,22 +105,587 @@ extern "C" void app_main(void) {
         }
 
         // Attendi la connessione Wi-Fi
-        wait_for_wifi_connection();
+        wifi_manager_wait_for_connection();
 
         // Inizializza GPIO
         gpio_handler_init();
 
         // Avvia il task HTTP Client
         xTaskCreate(&http_client_task, "http_client_task", 8192, NULL, 5, NULL);
+
+        // Il loop per la lettura degli ADC è stato rimosso da qui
+
+        // Deinizializza ADC quando non più necessario
+        // gpio_handler_deinit(); // Questo sarà gestito all'interno del task se necessario
+
     } else {
         // Avvia Wi-Fi AP e Web Server per la configurazione
         wifi_manager_start_ap();
         web_server_start();
     }
 }
+  
 
 
-wifi_manager.c
+gpio_handler.C
+#include "gpio_handler.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_log.h"
+
+static const char *TAG = "GPIO_Handler";
+
+#define ADC_UNIT            ADC_UNIT_1
+#define ADC_CHANNEL_0       ADC_CHANNEL_0    // GPIO36
+#define ADC_CHANNEL_3       ADC_CHANNEL_3    // GPIO39
+
+static adc_oneshot_unit_handle_t adc1_handle;
+
+void gpio_handler_init(void) {
+    // Configurazione dell'unità ADC
+    adc_oneshot_unit_init_cfg_t unit_cfg = {
+        .unit_id = ADC_UNIT,
+        .ulp_mode = ADC_ULP_MODE_DISABLE,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_new_unit(&unit_cfg, &adc1_handle));
+
+    // Configurazione dei canali ADC
+    adc_oneshot_chan_cfg_t chan_cfg = {
+        .bitwidth = ADC_BITWIDTH_DEFAULT,
+        .atten = ADC_ATTEN_DB_11,
+    };
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_0, &chan_cfg));
+    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, ADC_CHANNEL_3, &chan_cfg));
+}
+
+int gpio_handler_read_adc_channel0(void) {
+    int raw;
+    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_0, &raw));
+    return raw;
+}
+
+int gpio_handler_read_adc_channel3(void) {
+    int raw;
+    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, ADC_CHANNEL_3, &raw));
+    return raw;
+}
+
+void gpio_handler_deinit(void) {
+    ESP_ERROR_CHECK(adc_oneshot_del_unit(adc1_handle));
+}
+
+
+htpp_client.C
+#include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
+
+#include "http_client.h"
+#include "esp_http_client.h"
+#include "esp_log.h"
+#include "cJSON.h"
+#include "gpio_handler.h"
+#include "esp_websocket_client.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+
+static const char *TAG = "HTTP_Client";
+
+static int sensor_pk = -1; // Variabile per memorizzare la SensorPk ottenuta dall'API
+static int soglia = 10;    // Valore di soglia, da aggiornare se necessario
+volatile bool parameter_update_needed = false; // Flag per indicare se è necessario aggiornare i parametri
+
+static esp_err_t load_sensor_pk_from_nvs(int *sensor_pk) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open("storage", NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_get_i32(nvs_handle, "sensor_pk", sensor_pk);
+    nvs_close(nvs_handle);
+    return err;
+}
+
+static esp_err_t save_sensor_pk_to_nvs(int sensor_pk) {
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open("storage", NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_i32(nvs_handle, "sensor_pk", sensor_pk);
+    if (err == ESP_OK) {
+        err = nvs_commit(nvs_handle);
+    }
+    nvs_close(nvs_handle);
+    return err;
+}
+
+// Funzione per registrare il sensore e ottenere la SensorPk
+static esp_err_t register_sensor(int *sensor_pk) {
+    const char *server_url = "http://192.168.1.132:5001/sensor";
+
+    // Crea il JSON da inviare
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "tipo", 0); // Sostituisci con il tipo corretto
+
+    char *post_data = cJSON_PrintUnformatted(root);
+
+    esp_http_client_config_t config = {
+        .url = server_url,
+        .method = HTTP_METHOD_POST,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    // Imposta l'header e il corpo della richiesta
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, post_data, strlen(post_data));
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        int status = esp_http_client_get_status_code(client);
+        if (status == 200 || status == 201) {
+            // Ottieni la risposta dal server
+            char buffer[256];
+            int content_length = esp_http_client_get_content_length(client);
+            int total_read_len = 0;
+            int read_len;
+            char *ptr = buffer;
+
+            while (total_read_len < content_length && (read_len = esp_http_client_read(client, ptr, sizeof(buffer) - total_read_len - 1)) > 0) {
+                ptr += read_len;
+                total_read_len += read_len;
+            }
+            buffer[total_read_len] = '\0';
+
+            if (total_read_len > 0) {
+                // Parsea la risposta JSON
+                cJSON *response = cJSON_Parse(buffer);
+                if (response) {
+                    cJSON *sensor_id_item = cJSON_GetObjectItem(response, "sensor_id");
+                    if (sensor_id_item) {
+                        *sensor_pk = sensor_id_item->valueint;
+                        ESP_LOGI(TAG, "Registrazione sensore riuscita, SensorPk: %d", *sensor_pk);
+                    } else {
+                        ESP_LOGE(TAG, "Sensor ID non trovato nella risposta");
+                        err = ESP_FAIL;
+                    }
+                    cJSON_Delete(response);
+                } else {
+                    ESP_LOGE(TAG, "Errore nel parsing della risposta JSON");
+                    err = ESP_FAIL;
+                }
+            } else {
+                ESP_LOGE(TAG, "Nessuna risposta dal server");
+                err = ESP_FAIL;
+            }
+        } else {
+            ESP_LOGE(TAG, "Registrazione sensore fallita, status code: %d", status);
+            err = ESP_FAIL;
+        }
+    } else {
+        ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+    cJSON_Delete(root);
+    free(post_data);
+
+    return err;
+}
+
+// Funzione per inviare il valore del sensore all'API
+static esp_err_t send_sensor_value(int sensor_pk, int value, int allarme) {
+    const char *url = "http://192.168.1.132:5001/sensor/value";
+
+    // Crea il JSON da inviare
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddNumberToObject(root, "sensor_pk", sensor_pk);
+    cJSON_AddNumberToObject(root, "value", value);
+    cJSON_AddNumberToObject(root, "allarme", allarme);
+
+    char *post_data = cJSON_PrintUnformatted(root);
+
+    esp_http_client_config_t config = {
+        .url = url,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    // Imposta il metodo POST e il Content-Type
+    esp_http_client_set_method(client, HTTP_METHOD_POST);
+    esp_http_client_set_header(client, "Content-Type", "application/json");
+    esp_http_client_set_post_field(client, post_data, strlen(post_data));
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        int status = esp_http_client_get_status_code(client);
+        if (status == 200 || status == 201) {
+            ESP_LOGI(TAG, "Valore inviato con successo");
+        } else {
+            ESP_LOGE(TAG, "Invio del valore fallito, status code: %d", status);
+            err = ESP_FAIL;
+        }
+    } else {
+        ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+    cJSON_Delete(root);
+    free(post_data);
+
+    return err;
+}
+
+// Funzione per ottenere i parametri del sensore
+static esp_err_t get_sensor_parameters(int sensor_pk) {
+    char url[100];
+    snprintf(url, sizeof(url), "http://192.168.1.132:5001/sensor/%d", sensor_pk);
+
+    esp_http_client_config_t config = {
+        .url = url,
+        .method = HTTP_METHOD_GET,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&config);
+
+    esp_err_t err = esp_http_client_perform(client);
+    if (err == ESP_OK) {
+        int status = esp_http_client_get_status_code(client);
+        if (status == 200 || status == 201) {
+            // Ottieni la risposta dal server
+            char buffer[512];
+            int content_length = esp_http_client_get_content_length(client);
+            int total_read_len = 0;
+            int read_len;
+            char *ptr = buffer;
+
+            while (total_read_len < content_length && (read_len = esp_http_client_read(client, ptr, sizeof(buffer) - total_read_len - 1)) > 0) {
+                ptr += read_len;
+                total_read_len += read_len;
+            }
+            buffer[total_read_len] = '\0';
+
+            if (total_read_len > 0) {
+                // Parsea la risposta JSON
+                cJSON *response = cJSON_Parse(buffer);
+                if (response) {
+                    cJSON *sensor_array = cJSON_GetObjectItem(response, "sensor");
+                    if (sensor_array && cJSON_IsArray(sensor_array)) {
+                        cJSON *sensor_item = cJSON_GetArrayItem(sensor_array, 0);
+                        if (sensor_item) {
+                            cJSON *soglia_item = cJSON_GetObjectItem(sensor_item, "Soglia");
+                            if (soglia_item) {
+                                soglia = soglia_item->valueint;
+                                ESP_LOGI(TAG, "Aggiornata soglia: %d", soglia);
+                            } else {
+                                ESP_LOGE(TAG, "Soglia non trovata nella risposta");
+                                err = ESP_FAIL;
+                            }
+                        } else {
+                            ESP_LOGE(TAG, "Elemento sensore non trovato nell'array");
+                            err = ESP_FAIL;
+                        }
+                    } else {
+                        ESP_LOGE(TAG, "Array sensore non trovato nella risposta");
+                        err = ESP_FAIL;
+                    }
+                    cJSON_Delete(response);
+                } else {
+                    ESP_LOGE(TAG, "Errore nel parsing della risposta JSON");
+                    err = ESP_FAIL;
+                }
+            } else {
+                ESP_LOGE(TAG, "Nessuna risposta dal server");
+                err = ESP_FAIL;
+            }
+        } else {
+            ESP_LOGE(TAG, "Recupero dei parametri fallito, status code: %d", status);
+            err = ESP_FAIL;
+        }
+    } else {
+        ESP_LOGE(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
+    }
+
+    esp_http_client_cleanup(client);
+
+    return err;
+}
+
+void http_client_task(void *param) {
+    // Carica sensor_pk da NVS
+    esp_err_t err = load_sensor_pk_from_nvs(&sensor_pk);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "SensorPk caricato da NVS: %d", sensor_pk);
+    } else {
+        // Registrazione del sensore
+        if (register_sensor(&sensor_pk) != ESP_OK) {
+            ESP_LOGE(TAG, "Registrazione del sensore fallita. Riavvio in 10 secondi...");
+            vTaskDelay(pdMS_TO_TICKS(10000));
+            esp_restart();
+        }
+        // Salva sensor_pk in NVS
+        if (save_sensor_pk_to_nvs(sensor_pk) != ESP_OK) {
+            ESP_LOGE(TAG, "Errore nel salvataggio di SensorPk in NVS");
+        }
+    }
+
+    // Ottieni i parametri iniziali del sensore
+    get_sensor_parameters(sensor_pk);
+
+    // Inizializza GPIO
+    gpio_handler_init();
+
+    while (1) {
+        // Controlla se è necessario aggiornare i parametri
+        if (parameter_update_needed) {
+            ESP_LOGI(TAG, "Ricevuta notifica di aggiornamento, ottenimento nuovi parametri...");
+            get_sensor_parameters(sensor_pk);
+            parameter_update_needed = false;
+        }
+
+        // Leggi il valore ADC
+        int adc_value = gpio_handler_read_adc_channel0(); // Usa il canale ADC corretto
+
+        ESP_LOGI(TAG, "Valore ADC: %d", adc_value);
+
+        // Determina se scatta l'allarme
+        int allarme = adc_value > soglia ? 1 : 0;
+
+        // Invia il valore al server
+        if (send_sensor_value(sensor_pk, adc_value, allarme) != ESP_OK) {
+            ESP_LOGE(TAG, "Errore nell'invio del valore. Riprovo...");
+        }
+
+        // Delay prima della prossima lettura
+        vTaskDelay(pdMS_TO_TICKS(1000)); // Attendi 1 secondo
+    }
+}
+
+void websocket_client_task(void *param) {
+    esp_websocket_client_config_t websocket_cfg = {
+        .uri = "ws://192.168.1.132:5001/your_websocket_endpoint", // Sostituisci con l'endpoint corretto
+    };
+
+    esp_websocket_client_handle_t client = esp_websocket_client_init(&websocket_cfg);
+
+    if (esp_websocket_client_start(client) != ESP_OK) {
+        ESP_LOGE(TAG, "Impossibile avviare il client WebSocket");
+        vTaskDelete(NULL);
+    }
+
+    while (1) {
+        char buffer[128];
+        int len = esp_websocket_client_receive(client, buffer, sizeof(buffer) - 1, portMAX_DELAY);
+        if (len > 0) {
+            buffer[len] = '\0'; // Termina la stringa
+            ESP_LOGI(TAG, "Messaggio WebSocket ricevuto: %s", buffer);
+            // Imposta il flag per aggiornare i parametri
+            parameter_update_needed = true;
+        }
+    }
+
+    esp_websocket_client_stop(client);
+    esp_websocket_client_destroy(client);
+    vTaskDelete(NULL);
+}
+
+web_server.C
+#include "web_server.h"
+#include "esp_log.h"
+#include "esp_http_server.h"
+#include "wifi_manager.h"
+#include <string.h>
+#include "nvs_flash.h"
+#include "nvs.h"
+#include "esp_err.h"
+
+static const char *TAG = "Web_Server";
+static httpd_handle_t server = NULL;
+
+// Prototipo della funzione url_decode
+void url_decode(char *str);
+
+// Handler per la richiesta GET (pagina HTML)
+static esp_err_t wifi_config_get_handler(httpd_req_t *req) {
+    const char* resp_str = "<!DOCTYPE html>"
+    "<html>"
+    "<body>"
+    "<form action=\"/wifi-config\" method=\"post\">"
+    "SSID:<br>"
+    "<input type=\"text\" name=\"ssid\"><br>"
+    "Password:<br>"
+    "<input type=\"password\" name=\"password\"><br><br>"
+    "<input type=\"submit\" value=\"Submit\">"
+    "</form>"
+    "</body>"
+    "</html>";
+
+    httpd_resp_send(req, resp_str, HTTPD_RESP_USE_STRLEN);
+
+    return ESP_OK;
+}
+
+// Handler per la richiesta POST (salva credenziali)
+esp_err_t wifi_config_post_handler(httpd_req_t *req)
+{
+    char buf[200];
+    int ret, remaining = req->content_len;
+
+    if (remaining >= sizeof(buf)) {
+        ESP_LOGE(TAG, "Contenuto troppo lungo");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Contenuto troppo lungo");
+        return ESP_FAIL;
+    }
+
+    ret = httpd_req_recv(req, buf, remaining);
+    if (ret <= 0) {
+        ESP_LOGE(TAG, "Errore nel ricevere i dati");
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Errore nel ricevere i dati");
+        return ESP_FAIL;
+    }
+
+    buf[ret] = '\0'; // Termina la stringa
+
+    // Parsing dei dati del form
+    char ssid[32] = {0};
+    char password[64] = {0};
+
+    // Utilizza httpd_query_key_value per il parsing
+    if (httpd_query_key_value(buf, "ssid", ssid, sizeof(ssid)) != ESP_OK ||
+        httpd_query_key_value(buf, "password", password, sizeof(password)) != ESP_OK) {
+        ESP_LOGE(TAG, "Errore nel parsing dei dati del form");
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Dati del form non validi");
+        return ESP_FAIL;
+    }
+
+    // Decodifica URL
+    url_decode(ssid);
+    url_decode(password);
+
+    // Salva SSID e password nell'NVS
+    nvs_handle_t nvs_handle;
+    esp_err_t err = nvs_open("wifi_cred", NVS_READWRITE, &nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Errore nell'apertura dell'NVS: %s", esp_err_to_name(err));
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Errore nell'apertura dell'NVS");
+        return ESP_FAIL;
+    }
+
+    // Scrivi SSID e Password nell'NVS
+    err = nvs_set_str(nvs_handle, "ssid", ssid);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Errore nel settare l'SSID nell'NVS: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Errore nel salvare l'SSID");
+        return ESP_FAIL;
+    }
+
+    err = nvs_set_str(nvs_handle, "password", password);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Errore nel settare la password nell'NVS: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Errore nel salvare la password");
+        return ESP_FAIL;
+    }
+
+    // Esegui il commit delle modifiche
+    err = nvs_commit(nvs_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Errore nel commit dell'NVS: %s", esp_err_to_name(err));
+        nvs_close(nvs_handle);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Errore nel salvare le credenziali");
+        return ESP_FAIL;
+    }
+
+    // Chiudi l'handle NVS
+    nvs_close(nvs_handle);
+
+    // Invia una risposta al client
+    httpd_resp_send(req, "Credenziali ricevute e salvate. Riavvio in corso...", HTTPD_RESP_USE_STRLEN);
+
+    // Riavvia per applicare le nuove impostazioni Wi-Fi
+    esp_restart();
+
+    return ESP_OK;
+}
+
+// Funzione per decodificare URL
+void url_decode(char *str) {
+    char *pstr = str, *buf = str;
+    char hex[3];
+    while (*pstr) {
+        if (*pstr == '%') {
+            if (pstr[1] && pstr[2]) {
+                hex[0] = pstr[1];
+                hex[1] = pstr[2];
+                hex[2] = '\0';
+                *buf++ = (char) strtol(hex, NULL, 16);
+                pstr += 2;
+            }
+        } else if (*pstr == '+') {
+            *buf++ = ' ';
+        } else {
+            *buf++ = *pstr;
+        }
+        pstr++;
+    }
+    *buf = '\0';
+}
+
+// Handler per cancellare le credenziali Wi-Fi
+static esp_err_t wifi_config_delete_handler(httpd_req_t *req) {
+    wifi_manager_erase_credentials();
+    httpd_resp_send(req, "Credenziali Wi-Fi cancellate. Riavvio in corso...", HTTPD_RESP_USE_STRLEN);
+
+    // Riavvia
+    esp_restart();
+
+    return ESP_OK;
+}
+
+void web_server_start(void) {
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+
+    if (httpd_start(&server, &config) == ESP_OK) {
+        // Handler GET per la pagina di configurazione
+        httpd_uri_t wifi_config_get_uri = {
+            .uri = "/",
+            .method = HTTP_GET,
+            .handler = wifi_config_get_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &wifi_config_get_uri);
+
+        // Handler POST per ricevere le credenziali Wi-Fi
+        httpd_uri_t wifi_config_post_uri = {
+            .uri = "/wifi-config",
+            .method = HTTP_POST,
+            .handler = wifi_config_post_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &wifi_config_post_uri);
+
+        // Handler POST per cancellare le credenziali
+        httpd_uri_t wifi_config_delete_uri = {
+            .uri = "/wifi-config/delete",
+            .method = HTTP_POST,
+            .handler = wifi_config_delete_handler,
+            .user_ctx = NULL
+        };
+        httpd_register_uri_handler(server, &wifi_config_delete_uri);
+
+        ESP_LOGI(TAG, "Web server avviato.");
+    } else {
+        ESP_LOGE(TAG, "Impossibile avviare il web server.");
+    }
+}
+
+void web_server_stop(void) {
+    if (server) {
+        httpd_stop(server);
+        ESP_LOGI(TAG, "Web server fermato.");
+    }
+}
+
+
+wifi_manager.C
 #include <string.h>
 #include "nvs_flash.h"
 #include "esp_event.h"
@@ -126,36 +693,54 @@ wifi_manager.c
 #include "wifi_manager.h"
 #include "esp_wifi.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 
 static const char *TAG = "WiFi_Manager";
+static EventGroupHandle_t wifi_event_group;
+const int WIFI_CONNECTED_BIT = BIT0;
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base,
                                int32_t event_id, void *event_data) {
-    // Handle Wi-Fi events here
+    if (event_base == WIFI_EVENT) {
+        switch(event_id) {
+            case WIFI_EVENT_STA_START:
+                esp_wifi_connect();
+                break;
+            case WIFI_EVENT_STA_DISCONNECTED:
+                ESP_LOGI(TAG, "Disconnesso dal Wi-Fi, riconnessione in corso...");
+                esp_wifi_connect();
+                xEventGroupClearBits(wifi_event_group, WIFI_CONNECTED_BIT);
+                break;
+            default:
+                break;
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "Indirizzo IP ottenuto: " IPSTR, IP2STR(&event->ip_info.ip));
+        xEventGroupSetBits(wifi_event_group, WIFI_CONNECTED_BIT);
+    }
 }
 
 void wifi_manager_init(void) {
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES ||
-        ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        ESP_ERROR_CHECK(nvs_flash_erase());
-        ESP_ERROR_CHECK(nvs_flash_init());
-    }
+    wifi_event_group = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_netif_init());
 
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // Initialize default Wi-Fi interface
+    // Inizializza interfacce Wi-Fi di default
     esp_netif_create_default_wifi_sta();
     esp_netif_create_default_wifi_ap();
 
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     ESP_ERROR_CHECK(esp_wifi_init(&cfg));
 
-    // Register event handler
+    // Registra gestori di eventi
     ESP_ERROR_CHECK(esp_event_handler_instance_register(
         WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler, NULL, NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL));
 }
 
 esp_err_t wifi_manager_connect(const char *ssid, const char *password) {
@@ -166,7 +751,9 @@ esp_err_t wifi_manager_connect(const char *ssid, const char *password) {
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config));
 
-    return esp_wifi_start();
+    ESP_ERROR_CHECK(esp_wifi_start());
+
+    return ESP_OK;
 }
 
 void wifi_manager_start_ap(void) {
@@ -185,16 +772,16 @@ void wifi_manager_start_ap(void) {
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &wifi_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
-    ESP_LOGI(TAG, "Wi-Fi AP started. SSID:%s", wifi_config.ap.ssid);
+    ESP_LOGI(TAG, "Wi-Fi AP avviato. SSID:%s", wifi_config.ap.ssid);
 }
 
 void wifi_manager_erase_credentials(void) {
     nvs_handle_t nvs_handle;
-    ESP_ERROR_CHECK(nvs_open("wifi_credentials", NVS_READWRITE, &nvs_handle));
+    ESP_ERROR_CHECK(nvs_open("wifi_cred", NVS_READWRITE, &nvs_handle));
     ESP_ERROR_CHECK(nvs_erase_all(nvs_handle));
     ESP_ERROR_CHECK(nvs_commit(nvs_handle));
     nvs_close(nvs_handle);
-    ESP_LOGI(TAG, "Wi-Fi credentials erased.");
+    ESP_LOGI(TAG, "Credenziali Wi-Fi cancellate.");
 }
 
 int wifi_manager_credentials_exist(void) {
@@ -203,195 +790,24 @@ int wifi_manager_credentials_exist(void) {
     char ssid[32];
     size_t ssid_len = sizeof(ssid);
 
-    err = nvs_open("wifi_credentials", NVS_READONLY, &nvs_handle);
-    if (err == ESP_ERR_NVS_NOT_FOUND) {
-        return 1;
+    err = nvs_open("wifi_cred", NVS_READONLY, &nvs_handle);
+    if (err != ESP_OK) {
+        return 0; // Credenziali non esistono
     }
 
     err = nvs_get_str(nvs_handle, "ssid", ssid, &ssid_len);
     nvs_close(nvs_handle);
 
-    if (err == ESP_OK)
-        return 0;
+    if (err == ESP_OK && ssid_len > 0)
+        return 1; // Credenziali esistono
     else
-        return 1;
+        return 0; // Credenziali non esistono
 }
 
-
-web_server.c
-#include "web_server.h"
-#include "esp_log.h"
-#include "esp_http_server.h"
-#include "wifi_manager.h"
-#include <string.h>
-#include "nvs_flash.h"    // Aggiungi questo include
-#include "nvs.h"          // Aggiungi questo include
-#include "esp_err.h"
-#include "esp_log.h"
-
-static const char *TAG = "Web_Server";
-static httpd_handle_t server = NULL;
-
-// Handler for Wi-Fi configuration POST request
-
-esp_err_t wifi_config_post_handler(httpd_req_t *req)
-{
-    char ssid[32];
-    size_t ssid_len = req->content_len;
-
-    // Ricevi l'SSID dal client
-    int ret = httpd_req_recv(req, ssid, ssid_len);
-    if (ret <= 0) {
-        ESP_LOGE(TAG, "Errore nel ricevere l'SSID");
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Errore nel ricevere l'SSID");
-        return ESP_FAIL;
-    }
-
-    ssid[ssid_len] = '\0'; // Termina la stringa SSID con '\0'
-
-    // Apri un handle NVS
-    nvs_handle_t nvs_handle;
-    esp_err_t err = nvs_open("wifi_credentials", NVS_READWRITE, &nvs_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Errore nell'apertura dell'NVS: %s", esp_err_to_name(err));
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Errore nell'apertura dell'NVS");
-        return ESP_FAIL;
-    }
-
-    // Scrivi l'SSID nell'NVS
-    err = nvs_set_str(nvs_handle, "ssid", ssid);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Errore nel settare l'SSID nell'NVS: %s", esp_err_to_name(err));
-        nvs_close(nvs_handle);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Errore nel salvare l'SSID");
-        return ESP_FAIL;
-    }
-
-    // Esegui il commit delle modifiche
-    err = nvs_commit(nvs_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Errore nel commit dell'NVS: %s", esp_err_to_name(err));
-        nvs_close(nvs_handle);
-        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Errore nel salvare le credenziali");
-        return ESP_FAIL;
-    }
-
-    // Chiudi l'handle NVS
-    nvs_close(nvs_handle);
-
-    // Invia una risposta al client
-    httpd_resp_send(req, "SSID ricevuto e salvato", HTTPD_RESP_USE_STRLEN);
-
-    return ESP_OK;
-}
-
-// Handler for deleting Wi-Fi credentials
-static esp_err_t wifi_config_delete_handler(httpd_req_t *req) {
-    wifi_manager_erase_credentials();
-    httpd_resp_send(req, "Wi-Fi credentials deleted. Rebooting...", HTTPD_RESP_USE_STRLEN);
-
-    // Optionally, schedule a reboot
-    esp_restart();
-
-    return ESP_OK;
-}
-
-void web_server_start(void) {
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-
-    if (httpd_start(&server, &config) == ESP_OK) {
-        httpd_uri_t wifi_config_post_uri = {
-            .uri = "/wifi_config",
-            .method = HTTP_POST,
-            .handler = wifi_config_post_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &wifi_config_post_uri);
-
-        httpd_uri_t wifi_config_delete_uri = {
-            .uri = "/wifi_config/delete",
-            .method = HTTP_POST,
-            .handler = wifi_config_delete_handler,
-            .user_ctx = NULL
-        };
-        httpd_register_uri_handler(server, &wifi_config_delete_uri);
-
-        ESP_LOGI(TAG, "Web server started.");
-    } else {
-        ESP_LOGE(TAG, "Failed to start web server.");
-    }
-}
-
-void web_server_stop(void) {
-    if (server) {
-        httpd_stop(server);
-        ESP_LOGI(TAG, "Web server stopped.");
-    }
-}
-
-
-http_client.c
-#include <inttypes.h>
-
-#include "http_client.h"
-#include "esp_http_client.h"
-#include "esp_log.h"
-
-static const char *TAG = "HTTP_Client";
-
-void http_client_init(void) {
-    // Initialization code if needed
-}
-
-void http_client_task(void *param) {
-    const char *server_url = "http://your_server_ip:5001/endpoint";
-
-    while (1) {
-        // Perform HTTP GET
-        esp_http_client_config_t config = {
-            .url = server_url,
-        };
-        esp_http_client_handle_t client = esp_http_client_init(&config);
-
-        esp_err_t err = esp_http_client_perform(client);
-        if (esp_http_client_perform(client) == ESP_OK) {
-        ESP_LOGI(TAG, "HTTP GET Status = %d, content_length = %" PRId64,
-                 esp_http_client_get_status_code(client),
-                 esp_http_client_get_content_length(client));
-        } else {
-            ESP_LOGE(TAG, "HTTP GET request failed: %s", esp_err_to_name(err));
-        }
-        esp_http_client_cleanup(client);
-
-        // Perform HTTP POST if needed
-        // ...
-
-        // Delay before next request
-        vTaskDelay(pdMS_TO_TICKS(10000)); // Delay 10 seconds
-    }
-}
-
-gpio_handler.c
-#include "gpio_handler.h"
-#include "driver/gpio.h"
-
-#define INPUT_GPIO_PIN  GPIO_NUM_4  // Adjust as needed
-
-void gpio_handler_init(void) {
-    gpio_config_t io_conf = {
-        .pin_bit_mask = (1ULL << INPUT_GPIO_PIN),
-        .mode = GPIO_MODE_INPUT,
-        .pull_up_en = GPIO_PULLUP_DISABLE,
-        .pull_down_en = GPIO_PULLDOWN_ENABLE,
-        .intr_type = GPIO_INTR_DISABLE,
-    };
-    gpio_config(&io_conf);
-}
-
-int gpio_handler_read_input(void) {
-    return gpio_get_level(INPUT_GPIO_PIN);
+void wifi_manager_wait_for_connection(void) {
+    xEventGroupWaitBits(wifi_event_group, WIFI_CONNECTED_BIT,
+                        pdFALSE, pdTRUE, portMAX_DELAY);
 }
 
 
 
-dato che conosci il mio progetto mi puoi sistemare tutto il progetto per fare quello che voglio io e in maniera corretta? 
