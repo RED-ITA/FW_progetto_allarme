@@ -337,6 +337,12 @@ void http_client_task(void *param) {
     }
 
     while (1) {
+        if (gpio_handler_is_reset_button_pressed()) {
+            ESP_LOGI(TAG, "Pulsante di reset premuto in http_client. Cancellazione delle credenziali Wi-Fi.");
+            wifi_manager_erase_credentials();
+            esp_restart();
+        }
+
         if (sensor_pk == -1) {
             // Registrazione del sensore
             if (register_sensor(&sensor_pk) != ESP_OK) {
@@ -369,6 +375,12 @@ void http_client_task(void *param) {
         gpio_handler_init();
         int adc_value_old = -1;
         while (1) {
+            if (gpio_handler_is_reset_button_pressed()) {
+                ESP_LOGI(TAG, "Pulsante di reset premuto nel ciclo sensore. Cancellazione delle credenziali Wi-Fi.");
+                wifi_manager_erase_credentials();
+                esp_restart();
+            }
+
             // Controlla se è necessario aggiornare i parametri
             if (parameter_update_needed) {
                 ESP_LOGI(TAG, "Ricevuta notifica di aggiornamento, ottenimento nuovi parametri...");

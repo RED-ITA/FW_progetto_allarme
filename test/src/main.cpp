@@ -11,8 +11,6 @@
 
 static const char *TAG = "Main";
 
-
-
 extern "C" void app_main(void) {
     esp_log_level_set("*", ESP_LOG_VERBOSE);
 
@@ -23,6 +21,14 @@ extern "C" void app_main(void) {
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+
+    // Configura il pulsante di reset tramite gpio_handler
+    gpio_handler_configure_reset_button();
+    if (gpio_handler_is_reset_button_pressed()) {
+        ESP_LOGI(TAG, "Pulsante di reset premuto. Cancellazione delle credenziali Wi-Fi.");
+        wifi_manager_erase_credentials();
+        esp_restart();
+    }
 
     // Inizializza Wi-Fi Manager
     wifi_manager_init();
@@ -38,13 +44,11 @@ extern "C" void app_main(void) {
         esp_err_t err = nvs_open("wifi_cred", NVS_READONLY, &nvs_handle);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Errore nell'apertura dell'NVS: %s", esp_err_to_name(err));
-            // Gestisci l'errore
             wifi_manager_start_ap();
             web_server_start();
             return;
         }
 
-        // Lettura dell'SSID
         err = nvs_get_str(nvs_handle, "ssid", ssid, &ssid_len);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Errore nel recupero dell'SSID: %s", esp_err_to_name(err));
@@ -54,7 +58,6 @@ extern "C" void app_main(void) {
             return;
         }
 
-        // Lettura della Password
         err = nvs_get_str(nvs_handle, "password", password, &password_len);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Errore nel recupero della password: %s", esp_err_to_name(err));
@@ -70,7 +73,6 @@ extern "C" void app_main(void) {
         err = wifi_manager_connect(ssid, password);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Errore nella connessione Wi-Fi: %s", esp_err_to_name(err));
-            // Gestisci l'errore
             wifi_manager_start_ap();
             web_server_start();
             return;
@@ -79,16 +81,8 @@ extern "C" void app_main(void) {
         // Attendi la connessione Wi-Fi
         wifi_manager_wait_for_connection();
 
-        // Inizializza GPIO
-        // gpio_handler_init();
-
         // Avvia il task HTTP Client
         xTaskCreate(&http_client_task, "http_client_task", 8192, NULL, 5, NULL);
-
-        // Il loop per la lettura degli ADC è stato rimosso da qui
-
-        // Deinizializza ADC quando non più necessario
-        // gpio_handler_deinit(); // Questo sarà gestito all'interno del task se necessario
 
     } else {
         // Avvia Wi-Fi AP e Web Server per la configurazione
@@ -96,4 +90,3 @@ extern "C" void app_main(void) {
         web_server_start();
     }
 }
-  
