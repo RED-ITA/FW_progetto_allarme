@@ -2,6 +2,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "wifi_manager.h"
 #include "http_client.h"
 #include "esp_http_client.h"
 #include "esp_log.h"

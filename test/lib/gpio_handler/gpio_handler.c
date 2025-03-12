@@ -4,7 +4,7 @@
 
 static const char *TAG = "GPIO_Handler";
 
-#define GPIO_DIGITAL_CHANNEL0   GPIO_NUM_36  // corrispondente a ADC_CHANNEL_0
+#define GPIO_DIGITAL_CHANNEL0   GPIO_NUM_35  // corrispondente a ADC_CHANNEL_0
 #define GPIO_DIGITAL_CHANNEL3   GPIO_NUM_39  // corrispondente a ADC_CHANNEL_3
 #define RESET_BUTTON_PIN        GPIO_NUM_23  // Scegli il pin adatto in base all'hardware
 

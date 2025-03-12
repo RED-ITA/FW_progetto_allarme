@@ -81,6 +81,9 @@ extern "C" void app_main(void) {
         // Attendi la connessione Wi-Fi
         wifi_manager_wait_for_connection();
 
+        // Avvia il web server sulla nuova interfaccia STA (IP assegnato dal router)
+        web_server_start();
+
         // Avvia il task HTTP Client
         xTaskCreate(&http_client_task, "http_client_task", 8192, NULL, 5, NULL);
 
@@ -90,3 +93,8 @@ extern "C" void app_main(void) {
         web_server_start();
     }
 }
+
+
+
+
+// 6tmzbs5meuwn273d
